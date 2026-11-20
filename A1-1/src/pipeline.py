@@ -131,3 +131,49 @@ class DataAnalyzer:
     def summarize(self, data, columns):
         values = data[columns]
         return values.describe().T, values.corr()
+
+    def calculate_rfm(
+        self, data, customer="customer_id", date="t_dat", amount="price", as_of=None,
+    ):
+        purchases = data[[customer, date, amount]].copy()
+        purchases[date] = pd.to_datetime(purchases[date]).dt.normalize()
+        reference = purchases[date].max() if as_of is None else pd.Timestamp(as_of).normalize()
+        purchases = purchases.loc[purchases[date].le(reference)]
+        if purchases.empty:
+            raise ValueError("No purchases on or before the RFM reference date.")
+
+        rfm = purchases.groupby(customer).agg(
+            first_purchase=(date, "min"),
+            last_purchase=(date, "max"),
+            frequency=(date, "nunique"),
+            monetary=(amount, "sum"),
+        )
+        rfm["recency"] = (reference - rfm["last_purchase"]).dt.days
+        for metric, ascending in [("recency", False), ("frequency", True), ("monetary", True)]:
+            ranks = rfm[metric].rank(method="average", pct=True, ascending=ascending)
+            rfm[f"{metric[0]}_score"] = np.ceil(ranks * 4).astype(int)
+
+        recent = rfm["r_score"].ge(3)
+        frequent = rfm["f_score"].ge(3) & rfm["frequency"].gt(1)
+        high_value = rfm["m_score"].ge(3)
+        first_purchase = rfm["frequency"].eq(1) & rfm["recency"].le(30)
+        rfm["segment"] = np.select(
+            [recent & frequent & high_value, recent & frequent,
+             recent & first_purchase, ~recent],
+            ["VIP", "Loyal", "New", "Churned"],
+            default="Active",
+        )
+        rfm.attrs["reference_date"] = reference
+        return rfm
+
+    def summarize_segments(self, rfm):
+        summary = rfm.groupby("segment").agg(
+            customers=("segment", "size"),
+            mean_recency=("recency", "mean"),
+            mean_frequency=("frequency", "mean"),
+            mean_monetary=("monetary", "mean"),
+            total_monetary=("monetary", "sum"),
+        )
+        summary["customer_share"] = summary["customers"] / len(rfm)
+        summary["monetary_share"] = summary["total_monetary"] / rfm["monetary"].sum()
+        return summary.sort_values("customers", ascending=False)
