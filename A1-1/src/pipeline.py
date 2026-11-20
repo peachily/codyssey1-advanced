@@ -60,3 +60,70 @@ class DataAnalyzer:
             merged[column] = merged[column].astype("category")
         merged["prod_name"] = merged["prod_name"].astype("string")
         return merged
+
+    def handle_missing_values(self, data, column, group, strategy="median"):
+        values = data[column]
+        group_values = data.groupby(group, observed=True, dropna=False)[column]
+        if strategy == "median":
+            estimates = group_values.transform("median")
+            fallback = values.median()
+        elif strategy == "mean":
+            estimates = group_values.transform("mean")
+            fallback = values.mean()
+        else:
+            raise ValueError("Choose 'median' or 'mean' for imputation.")
+
+        return values.fillna(estimates).fillna(fallback)
+
+    def detect_outliers(self, data, column, threshold=1.5):
+        values = data[column]
+        q1, q3 = values.quantile([0.25, 0.75])
+        iqr = q3 - q1
+        lower = q1 - threshold * iqr
+        upper = q3 + threshold * iqr
+        mask = values.lt(lower) | values.gt(upper)
+        return q1, q3, lower, upper, mask
+
+    def add_text_features(self, data):
+        names = data["prod_name"]
+        return data.assign(
+            product_name_length=names.str.len(),
+            product_name_word_count=names.str.split().str.len(),
+        )
+
+    def add_image_features(self, data, sample_size=500, seed=42):
+        from matplotlib.image import imread
+
+        image_dir = self.data_dir / "images"
+        if not image_dir.is_dir():
+            raise FileNotFoundError(f"Place the product JPG files under {image_dir}.")
+
+        ids = data["article_id"].drop_duplicates().sort_values(ignore_index=True)
+        ids = ids.sample(frac=1, random_state=seed)
+        images = []
+        image_ids = []
+        for article_id in ids:
+            path = image_dir / article_id[:3] / f"{article_id}.jpg"
+            if not path.is_file():
+                continue
+            pixels = imread(path)
+            rows = np.linspace(0, pixels.shape[0] - 1, 32, dtype=int)
+            cols = np.linspace(0, pixels.shape[1] - 1, 32, dtype=int)
+            pixels = pixels[rows[:, None], cols]
+            if pixels.ndim == 2:
+                pixels = np.repeat(pixels[..., None], 3, axis=2)
+            images.append(pixels[..., :3])
+            image_ids.append(article_id)
+            if len(image_ids) == sample_size:
+                break
+
+        if not images:
+            raise ValueError("No product JPG files matched the sampled transactions.")
+
+        pixels = np.stack(images).astype(float) / 255
+        features = pd.DataFrame({
+            "article_id": image_ids,
+            "image_mean": pixels.mean(axis=(1, 2, 3)),
+            "image_std": pixels.std(axis=(1, 2, 3)),
+        })
+        return data.merge(features, on="article_id", how="left", validate="many_to_one")
