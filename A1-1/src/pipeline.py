@@ -127,3 +127,7 @@ class DataAnalyzer:
             "image_std": pixels.std(axis=(1, 2, 3)),
         })
         return data.merge(features, on="article_id", how="left", validate="many_to_one")
+
+    def summarize(self, data, columns):
+        values = data[columns]
+        return values.describe().T, values.corr()
